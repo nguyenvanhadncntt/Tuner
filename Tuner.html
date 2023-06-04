@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,user-scalable=no"
+    />
+    <title>Online Tuner</title>
+  </head>
+  <body>
+    <div class="container">
+      <div>
+        <p id="note">______</p>
+      </div>
+      <button id="startBtn">Start Tuner</button>
+      <button id="playBtn">Play</button>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@9"></script>
+    <script src="https://cdn.jsdelivr.net/npm/aubiojs@0.1.1/build/aubio.min.js"></script>
+    <script>
+      let timer = 0;
+      const a4 = 440;
+      const middleA = a4;
+      const semitone = 69;
+      const bufferSize = 4096;
+      const noteStrings = ["C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"];
+      let audioContext, analyser, scriptProcessor, pitchDetector, lastNote, lastFrequency, stopNotes;
+      const noiseThreshold = 0.5; // Adjust this value as needed
+      let noteElement = document.getElementById("note");
+      let noteIndex = 0; // Chỉ số của note trong danh sách
+      let startTime = null; // Thời gian bắt đầu
+      let isListening = false; // Trạng thái lắng nghe
+      const MIN_FREQUENCY = 120.81;
+      const notesToDetect = [
+        {"note": "C5", "time": 3},
+        {"note": "D5", "time": 3},
+        {"note": "E5", "time": 3},
+        {"note": "F5", "time": 3},
+        {"note": "G5", "time": 3},
+        {"note": "A5", "time": 3},
+      ];
+
+      document.getElementById("startBtn").addEventListener("click", () => {
+        if (!isListening) {
+          startListening();
+          isListening = true;
+        }
+      });
+
+      document.getElementById("playBtn").addEventListener("click", () => {
+        playNotes();
+      });
+
+      function startListening() {
+        startTime = new Date().getTime(); // Lưu thời gian bắt đầu
+        noteIndex = 0; // Reset chỉ số note
+        timer = 0; // Reset timer
+        getBrowserMedia();
+        listener();
+      }
+
+      function getBrowserMedia() {
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!window.AudioContext) {
+          return alert("AudioContext not supported");
+        }
+
+        // Older browsers might not implement mediaDevices at all, so we set an empty object first
+        if (navigator.mediaDevices === undefined) {
+          navigator.mediaDevices = {};
+        }
+
+        // Some browsers partially implement mediaDevices. We can't just assign an object
+        // with getUserMedia as it would overwrite existing properties.
+        // Here, we will just add the getUserMedia property if it's missing.
+        if (navigator.mediaDevices.getUserMedia === undefined) {
+          navigator.mediaDevices.getUserMedia = function (constraints) {
+            // First get ahold of the legacy getUserMedia, if present
+            const getUserMedia =
+              navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+
+            // Some browsers just don't implement it - return a rejected promise with an error
+            // to keep a consistent interface
+            if (!getUserMedia) {
+              alert("getUserMedia is not implemented in this browser");
+            }
+
+            // Otherwise, wrap the call to the old navigator.getUserMedia with a Promise
+            return new Promise(function (resolve, reject) {
+              getUserMedia.call(navigator, constraints, resolve, reject);
+            });
+          };
+        }
+      }
+
+      function listener() {
+        audioContext = new window.AudioContext();
+        analyser = audioContext.createAnalyser();
+        scriptProcessor = audioContext.createScriptProcessor(
+          bufferSize,
+          1,
+          1
+        );
+        aubio().then(function (aubio) {
+          pitchDetector = new aubio.Pitch(
+            "default",
+            bufferSize,
+            1,
+            audioContext.sampleRate
+          );
+        }); 
+        navigator.mediaDevices
+          .getUserMedia({ audio: true })
+          .then(function (stream) {
+            audioContext.createMediaStreamSource(stream).connect(analyser);
+            analyser.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+
+            scriptProcessor.addEventListener("audioprocess", function (event) {
+              const frequency = pitchDetector.do(
+                event.inputBuffer.getChannelData(0)
+              );
+              const frequencyData = new Uint8Array(analyser.frequencyBinCount);
+              analyser.getByteFrequencyData(frequencyData)
+              const amplitude = getAmplitude(event.inputBuffer.getChannelData(0));
+              if (frequency && amplitude > noiseThreshold && onNoteDetected) {
+                lastFrequency = frequency;
+                const note = getNote(frequency);
+                onNoteDetected({
+                  name: noteStrings[note % 12],
+                  value: note,
+                  cents: getCents(frequency, note),
+                  octave: parseInt(note / 12) - 1,
+                  frequency: frequency,
+                });
+              } else {
+                
+                if (frequency < 1 && !stopNotes) {
+                  const currentTime = new Date().getTime(); // Thời gian hiện tại
+                  elapsedTime = (currentTime - startTime) / 1000; // Thời gian đã trôi qua tính bằng giây
+                  // notesToDetect[noteIndex].duration = elapsedTime;
+                  if (stopNotes != lastNote)
+                    console.log(lastNote + " " + elapsedTime);
+                  stopNotes = lastNote;
+                  startTime = new Date().getTime();
+                }
+              }
+            });
+          })
+          .catch(function (error) {
+            alert(error.name + ": " + error.message);
+          });
+      }
+
+      function getAmplitude(buffer) {
+        let maxAmplitude = 0;
+        for (let i = 0; i < buffer.length; i++) {
+          const amplitude = Math.abs(buffer[i]);
+          if (amplitude > maxAmplitude) {
+            maxAmplitude = amplitude;
+          }
+        }
+        return maxAmplitude;
+      }
+
+      function getNote (frequency) {
+        const note = 12 * (Math.log(frequency / middleA) / Math.log(2));
+        return Math.round(note) + semitone;
+      }
+
+      function getCents (frequency, note) {
+        return Math.floor(
+          (1200 * Math.log(frequency / getStandardFrequency(note))) / Math.log(2)
+        );
+      }
+
+      function onNoteDetected (note) {
+        if (isListening) {
+          let elapsedTime; // Thời gian đã trôi qua tính bằng giây
+          if (lastNote !== (note.name + note.octave)) {
+            const currentTime = new Date().getTime(); // Thời gian hiện tại
+            elapsedTime = (currentTime - startTime) / 1000; // Thời gian đã trôi qua tính bằng giây
+            startTime = new Date().getTime();
+            console.log(lastNote + " " + elapsedTime);
+            lastNote = (note.name + note.octave);
+            stopNotes = null;
+            // if (lastNote === notesToDetect[noteIndex].note) {
+            //   // console.log("index")
+            //   notesToDetect[noteIndex].accept = true;
+            //   const currentTime = new Date().getTime(); // Thời gian hiện tại
+            //   elapsedTime = (currentTime - startTime) / 1000; // Thời gian đã trôi qua tính bằng giây
+            //   notesToDetect[noteIndex].duration = elapsedTime;
+            //   startTime = new Date().getTime();
+            // }
+            // lastNote = note.name + note.octave;
+          }
+
+          
+          if (
+            noteIndex < notesToDetect.length && // Kiểm tra noteIndex không vượt quá số lượng note trong danh sách
+            (note.name + note.octave) === notesToDetect[noteIndex].note && // Kiểm tra note khớp với note hiện tại trong danh sách
+            elapsedTime >= notesToDetect[noteIndex].time // Kiểm tra đã đủ thời gian cho note hiện tại
+          ) {
+            console.log(notesToDetect[noteIndex].note);
+            Swal.fire({
+              title: "Note Detected!",
+              text: "Note: " + note.name + note.octave,
+              icon: "success",
+              timer: 1500,
+            });
+            // startTime = new Date().getTime();
+            noteIndex++; // Tăng chỉ số note
+          }
+
+          noteElement.innerText = note.name + note.octave;
+          timer++;
+        }
+      }
+
+      function getStandardFrequency (note) {
+        return middleA * Math.pow(2, (note - semitone) / 12);
+      }
+
+      function playNotes() {
+        loopNotes();
+      }
+
+      function loopNotes() {
+        console.log(noteIndex);
+        setTimeout(() => {
+              noteIndex++;
+              if (noteIndex === notesToDetect.length) {
+                noteIndex--;
+              } else {
+                loopNotes();
+              }
+            }, notesToDetect[noteIndex].time * 1000);
+      }
+
+    </script>
+  </body>
+</html>
